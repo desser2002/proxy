@@ -1,10 +1,6 @@
 package com.test.junit;
 
-import com.test.junit.anotation.AfterAll;
-import com.test.junit.anotation.AfterMethod;
-import com.test.junit.anotation.BeforeAll;
-import com.test.junit.anotation.BeforeMethod;
-import com.test.junit.anotation.Test;
+import com.test.junit.anotation.*;
 import com.test.junit.assertion.AssertionsRuntimeException;
 
 import java.lang.annotation.Annotation;
@@ -14,6 +10,8 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.*;
+import java.util.concurrent.TimeUnit;
 
 public class TestRunner {
 
@@ -78,9 +76,15 @@ public class TestRunner {
             try {
                 method.setAccessible(true);
                 invokeMethods(instance, beforeEachMethods);
-                method.invoke(instance);
-                invokeMethods(instance, afterEachMethods);
-                handleSunnyDayScenario(method);
+
+                Timeout timeout = method.getAnnotation(Timeout.class);
+                if (timeout != null) {
+                    runWithTimeout(instance, method, afterEachMethods, timeout);
+                } else {
+                    method.invoke(instance);
+                    invokeMethods(instance, afterEachMethods);
+                    handleSunnyDayScenario(method);
+                }
             } catch (InvocationTargetException e) {
                 if (e.getCause() instanceof AssertionsRuntimeException) {
                     AssertionsRuntimeException ae = (AssertionsRuntimeException) e.getCause();
@@ -92,15 +96,64 @@ public class TestRunner {
         });
     }
 
+    private static void runWithTimeout(Object instance, Method method, List<Method> afterEachMethods, Timeout timeout) {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<?> future = executor.submit(() -> {
+            try {
+                method.invoke(instance);
+            } catch (IllegalAccessException | InvocationTargetException e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        try {
+            future.get(timeout.time(), timeout.timeUnit().toJavaTimeUnit());
+            invokeMethods(instance, afterEachMethods);
+            handleSunnyDayScenario(method);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof AssertionsRuntimeException ae) {
+                invokeMethods(instance, afterEachMethods);
+                handleAssertionException(method, ae);
+            }
+        } catch (InterruptedException e) {
+            invokeMethods(instance, afterEachMethods);
+            throw new RuntimeException(e);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            invokeMethods(instance, afterEachMethods);
+            handleTimeoutScenario(method, timeout);
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+
+    private static void handleTimeoutScenario(Method method, Timeout timeout) {
+        System.out.println(ConsoleColors.RED);
+        System.out.println(String.format("[Test method %s] failed by timeout [%d %s]",
+                getTestDescription(method), timeout.time(), timeout.timeUnit().name()));
+        System.out.println(ConsoleColors.RESET);
+    }
+
+    private static String getTestDescription(Method method) {
+        Description description = method.getAnnotation(Description.class);
+        if (description != null && !description.message().isEmpty()) {
+            return description.message();
+        }
+        return method.getName();
+    }
+
+
     private static void handleAssertionException(Method method, AssertionsRuntimeException e) {
         System.out.println(ConsoleColors.RED);
-        System.out.println(String.format("[Test method %s] is failed. Expected = [%s]; actual = [%s]", method.getName(), e.getExpected(), e.getActual()));
+        System.out.println(String.format("[Test method %s] is failed. Expected = [%s]; actual = [%s]", getTestDescription(method), e.getExpected(), e.getActual()));
         System.out.println(ConsoleColors.RESET);
     }
 
     private static void handleSunnyDayScenario(Method method) {
         System.out.println(ConsoleColors.GREEN);
-        System.out.println(String.format("[Test method %s] is successful", method.getName()));
+        System.out.println(String.format("[Test method %s] is successful", getTestDescription(method)));
         System.out.println(ConsoleColors.RESET);
     }
 }
